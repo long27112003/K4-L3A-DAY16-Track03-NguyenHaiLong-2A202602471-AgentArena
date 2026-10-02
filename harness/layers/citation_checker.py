@@ -77,7 +77,8 @@ class CitationChecker(Middleware):
         def _matches_line(doc, text: str) -> bool:
             if not doc or not doc.body or not text:
                 return False
-            return any(text in line for line in doc.body.splitlines())
+            clean = text.strip()
+            return any(text in line or clean in line for line in doc.body.splitlines())
 
         for claim in claims:
             if not isinstance(claim, dict):
@@ -86,7 +87,9 @@ class CitationChecker(Middleware):
             if not text:
                 continue
 
-            current_doc = ctx.corpus.get(claim.get("doc_id", ""))
+            curr_id = str(claim.get("doc_id", "")).strip()
+            claim["doc_id"] = curr_id
+            current_doc = ctx.corpus.get(curr_id)
             if current_doc and _matches_line(current_doc, text):
                 continue
 
@@ -96,6 +99,6 @@ class CitationChecker(Middleware):
                     break
 
         report["citations"] = sorted(
-            {c["doc_id"] for c in claims if isinstance(c, dict) and c.get("doc_id")}
+            {str(c["doc_id"]).strip() for c in claims if isinstance(c, dict) and c.get("doc_id") and str(c["doc_id"]).strip()}
         )
         return report

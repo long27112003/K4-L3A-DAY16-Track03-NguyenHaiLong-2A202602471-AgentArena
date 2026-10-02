@@ -79,16 +79,76 @@ class Critic(Middleware):
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        if not report or not isinstance(report, dict):
+            return report
+        claims = report.get("claims")
+        if not claims or not isinstance(claims, list):
+            return report
+
+        def _find_doc_for_text(text: str):
+            if not text or not getattr(ctx, "corpus", None):
+                return None
+            clean = text.strip()
+            for doc in ctx.corpus.docs:
+                if doc.body in ctx.observed_text and any(
+                    text in line or clean in line for line in doc.body.splitlines()
+                ):
+                    return doc
+            return None
+
+        def _try_split_fused(text: str):
+            delimiter = " và "
+            start = 0
+            while True:
+                pos = text.find(delimiter, start)
+                if pos == -1:
+                    break
+                left = text[:pos]
+                right = text[pos + len(delimiter):]
+                if (ctx.saw(left) or ctx.saw(left.strip())) and (ctx.saw(right) or ctx.saw(right.strip())):
+                    doc_left = _find_doc_for_text(left)
+                    doc_right = _find_doc_for_text(right)
+                    if doc_left and doc_right and doc_left.doc_id != doc_right.doc_id:
+                        return (left, doc_left.doc_id), (right, doc_right.doc_id)
+                start = pos + len(delimiter)
+            return None
+
+        new_claims = []
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text", "")
+            if not text:
+                continue
+
+            if ctx.saw(text) or ctx.saw(text.strip()):
+                if not claim.get("doc_id"):
+                    doc = _find_doc_for_text(text)
+                    if doc:
+                        claim["doc_id"] = doc.doc_id
+                else:
+                    claim["doc_id"] = str(claim["doc_id"]).strip()
+                new_claims.append(claim)
+            else:
+                fused = _try_split_fused(text)
+                if fused:
+                    (left, doc_left_id), (right, doc_right_id) = fused
+                    new_claims.append({"text": left, "doc_id": doc_left_id})
+                    new_claims.append({"text": right, "doc_id": doc_right_id})
+                    report["abstain"] = True
+
+        if not new_claims:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = (
+                "Hiện không có tài liệu hay số liệu xác thực nào trong kho để trả lời câu hỏi này."
+            )
+            report.pop("verdict", None)
+        else:
+            report["claims"] = new_claims
+            report["citations"] = sorted(
+                {str(c["doc_id"]).strip() for c in new_claims if isinstance(c, dict) and c.get("doc_id") and str(c["doc_id"]).strip()}
+            )
+
+        return report
